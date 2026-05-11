@@ -1,4 +1,4 @@
-import { AstroModularSettings, PresetTemplate, NavigationItem, ThemeType } from '../../types';
+import { AstroModularSettings, PresetTemplate, ThemeType } from '../../types';
 import { ConfigTemplateManager } from './ConfigTemplateManager';
 import { ConfigMarkerValidator } from './ConfigMarkerValidator';
 

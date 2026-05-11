@@ -293,7 +293,55 @@ export class NavigationTab extends TabRenderer {
 				if (target.classList.contains('nav-title')) {
 					const item = target.closest('.nav-item');
 					const index = parseInt(item?.getAttribute('data-index') || '0');
-					settings.navigation.pages[index].title = target.value;
+					const page = settings.navigation.pages[index];
+					const defaultLocale = settings.siteInfo?.defaultLocale ?? '';
+					// Preserve LocalisedString shape if the title was already an object —
+					// otherwise the per-locale translations would be wiped by a UI edit.
+					if (typeof page.title === 'object' && page.title !== null && defaultLocale) {
+						(page.title as Record<string, string>)[defaultLocale] = target.value;
+					} else {
+						page.title = target.value;
+					}
+					this.debouncedSave();
+				} else if (target.classList.contains('nav-i18nKey')) {
+					const item = target.closest('.nav-item');
+					const index = parseInt(item?.getAttribute('data-index') || '0');
+					const page = settings.navigation.pages[index];
+					const value = target.value.trim();
+					if (value === '') {
+						delete page.i18nKey;
+					} else {
+						page.i18nKey = value;
+					}
+					this.debouncedSave();
+				} else if (target.classList.contains('nav-external')) {
+					const item = target.closest('.nav-item');
+					const index = parseInt(item?.getAttribute('data-index') || '0');
+					const page = settings.navigation.pages[index];
+					if (target.checked) {
+						page.external = true;
+					} else {
+						delete page.external;
+					}
+					this.debouncedSave();
+				} else if (target.classList.contains('nav-url-locale')) {
+					const item = target.closest('.nav-item');
+					const index = parseInt(item?.getAttribute('data-index') || '0');
+					const locale = target.getAttribute('data-locale') || '';
+					const page = settings.navigation.pages[index];
+					const value = target.value.trim();
+					if (!locale) return;
+					if (value === '') {
+						if (page.urlByLocale) {
+							delete page.urlByLocale[locale];
+							if (Object.keys(page.urlByLocale).length === 0) {
+								delete page.urlByLocale;
+							}
+						}
+					} else {
+						if (!page.urlByLocale) page.urlByLocale = {};
+						page.urlByLocale[locale] = value;
+					}
 					this.debouncedSave();
 				} else if (target.classList.contains('nav-url')) {
 					const item = target.closest('.nav-item');
@@ -452,28 +500,37 @@ export class NavigationTab extends TabRenderer {
 
 	private renderPageItem(container: HTMLElement, page: NavigationItem, index: number): void {
 		const hasChildren = page.children && page.children.length > 0;
-		
+		const settings = this.getSettings();
+		const locales = settings.siteInfo?.locales ?? [];
+		const defaultLocale = settings.siteInfo?.defaultLocale ?? locales[0] ?? '';
+		const nonDefaultLocales = locales.filter((l) => l !== defaultLocale);
+
 		const navItem = container.createDiv('nav-item');
 		navItem.setAttribute('data-index', index.toString());
 		navItem.setAttribute('draggable', 'true');
-		
+
 		const itemContent = navItem.createDiv('nav-item-content');
 		const itemFields = itemContent.createDiv('nav-item-fields');
-		
+
 		const titleInput = itemFields.createEl('input', {
 			type: 'text',
 			cls: 'nav-title',
 			attr: { placeholder: 'Page title', draggable: 'false' }
 		});
-		titleInput.value = page.title || '';
-		
+		// Title may be string or LocalisedString — display the default-locale value
+		// for the primary input; per-locale title editing is i18nKey-driven, so we
+		// don't render per-locale title inputs here.
+		titleInput.value = typeof page.title === 'string'
+			? page.title
+			: (page.title?.[defaultLocale] ?? '');
+
 		const urlInput = itemFields.createEl('input', {
 			type: 'text',
 			cls: 'nav-url',
 			attr: { placeholder: '/page-url (leave empty for dropdown-only)', draggable: 'false' }
 		});
 		urlInput.value = page.url || '';
-		
+
 		const itemActions = itemContent.createDiv('nav-item-actions');
 		itemActions.createEl('button', {
 			// "+ Child" is a button label, keep as is
@@ -482,12 +539,52 @@ export class NavigationTab extends TabRenderer {
 			cls: 'nav-add-child',
 			attr: { 'data-index': index.toString(), title: 'Add child page' }
 		});
-		
+
 		const removeBtn = itemActions.createEl('button', {
 			cls: 'nav-remove mod-warning',
 			attr: { 'data-index': index.toString(), 'data-icon': 'trash', title: 'Remove', 'aria-label': 'Remove' }
 		});
 		setIcon(removeBtn, 'trash');
+
+		// i18n controls — only rendered when the site is multi-locale. Skipping
+		// when locales.length <= 1 keeps the UI clean for single-locale users.
+		if (locales.length > 1) {
+			const i18nRow = navItem.createDiv('nav-item-i18n');
+
+			// i18nKey (T9 strings-table key for translated label)
+			const i18nKeyInput = i18nRow.createEl('input', {
+				type: 'text',
+				cls: 'nav-i18nKey',
+				attr: { placeholder: 'i18nKey (e.g. nav.posts) — optional', draggable: 'false' }
+			});
+			i18nKeyInput.value = (page.i18nKey as string | undefined) ?? '';
+
+			// external toggle
+			const externalLabel = i18nRow.createEl('label', { cls: 'nav-external-label' });
+			const externalCheckbox = externalLabel.createEl('input', {
+				type: 'checkbox',
+				cls: 'nav-external',
+				attr: { draggable: 'false' }
+			});
+			externalCheckbox.checked = page.external === true;
+			externalLabel.createSpan({ text: ' external' });
+
+			// Per-locale URL overrides (urlByLocale). One input per non-default locale.
+			for (const locale of nonDefaultLocales) {
+				const urlLocaleRow = navItem.createDiv('nav-item-url-locale');
+				urlLocaleRow.createSpan({ text: `URL (${locale}):`, cls: 'nav-url-locale-label' });
+				const urlLocaleInput = urlLocaleRow.createEl('input', {
+					type: 'text',
+					cls: `nav-url-locale nav-url-locale-${locale}`,
+					attr: {
+						placeholder: `/${locale}/page-url (overrides default prefix)`,
+						draggable: 'false',
+						'data-locale': locale,
+					}
+				});
+				urlLocaleInput.value = page.urlByLocale?.[locale] ?? '';
+			}
+		}
 		
 		const childrenContainer = navItem.createDiv('nav-children-container');
 		childrenContainer.setAttribute('data-parent-index', index.toString());
