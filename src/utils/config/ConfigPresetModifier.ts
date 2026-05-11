@@ -28,6 +28,81 @@ export class ConfigPresetModifier {
 		return JSON.stringify(value);
 	}
 
+	/**
+	 * Serialize a JS value as a TypeScript literal. Used to round-trip arbitrary
+	 * NavigationItem fields (i18nKey, urlByLocale, external, unknown future fields)
+	 * and LocalisedString objects through config.ts without dropping them.
+	 *
+	 * Output is multi-line for objects/arrays at the requested base indent.
+	 */
+	private serializeTsValue(value: unknown, indent: string = ''): string {
+		if (value === null) return 'null';
+		if (value === undefined) return 'undefined';
+		if (typeof value === 'boolean') return String(value);
+		if (typeof value === 'number') return String(value);
+		if (typeof value === 'string') {
+			return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+		}
+		if (Array.isArray(value)) {
+			if (value.length === 0) return '[]';
+			const childIndent = indent + '  ';
+			const items = value.map((v) => childIndent + this.serializeTsValue(v, childIndent));
+			return `[\n${items.join(',\n')}\n${indent}]`;
+		}
+		if (typeof value === 'object') {
+			const obj = value as Record<string, unknown>;
+			// __raw passthrough from parser — emit identifier verbatim.
+			if (obj.__raw && typeof obj.__raw === 'string' && Object.keys(obj).length === 1) {
+				return obj.__raw;
+			}
+			const entries = Object.entries(obj).filter(([k]) => !k.startsWith('__spread__'));
+			if (entries.length === 0) return '{}';
+			const childIndent = indent + '  ';
+			const items = entries.map(([k, v]) => {
+				const keyStr = /^[A-Za-z_$][\w$]*$/.test(k) ? k : `"${k}"`;
+				return `${childIndent}${keyStr}: ${this.serializeTsValue(v, childIndent)}`;
+			});
+			return `{\n${items.join(',\n')}\n${indent}}`;
+		}
+		return 'undefined';
+	}
+
+	/**
+	 * Serialize a NavigationItem as a single-line-when-simple, multi-line-when-nested
+	 * TypeScript object literal. Preserves arbitrary unknown fields (the round-trip
+	 * guarantee for i18nKey / urlByLocale / external / future extensions).
+	 */
+	private serializeNavItem(item: Record<string, unknown>, indent: string): string {
+		const entries = Object.entries(item).filter(([k]) => !k.startsWith('__spread__'));
+		if (entries.length === 0) return `${indent}{}`;
+
+		// Children gets multi-line treatment; everything else is inline.
+		const hasChildren = 'children' in item && Array.isArray(item.children) && (item.children as unknown[]).length > 0;
+		const inlineEntries = entries.filter(([k]) => k !== 'children');
+		const childEntry = entries.find(([k]) => k === 'children');
+
+		const inlineParts = inlineEntries.map(([k, v]) => {
+			const keyStr = /^[A-Za-z_$][\w$]*$/.test(k) ? k : `"${k}"`;
+			// For values that themselves are objects or arrays, format with proper indent.
+			if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
+				return `${keyStr}: ${this.serializeTsValue(v, indent)}`;
+			}
+			if (Array.isArray(v)) {
+				return `${keyStr}: ${this.serializeTsValue(v, indent)}`;
+			}
+			return `${keyStr}: ${this.serializeTsValue(v)}`;
+		});
+
+		if (!hasChildren) {
+			return `${indent}{ ${inlineParts.join(', ')} }`;
+		}
+
+		const children = childEntry![1] as Record<string, unknown>[];
+		const childIndent = indent + '  ';
+		const childItems = children.map((c) => this.serializeNavItem(c, childIndent + '  '));
+		return `${indent}{ ${inlineParts.join(', ')},\n${childIndent}children: [\n${childItems.join(',\n')}\n${childIndent}]\n${indent}}`;
+	}
+
 	getTemplateConfig(templateName: string, settings: AstroModularSettings): Record<string, unknown> {
 		// Expose template config for external use
 		return this.templateManager.getTemplateConfig(templateName, settings);
@@ -723,43 +798,30 @@ export class ConfigPresetModifier {
 			);
 		}
 		
-		// Update navigation pages (with nested support)
-		const serializeNavigationItem = (item: NavigationItem, indent: string = '      '): string => {
-			let result = `${indent}{ title: "${item.title}"`;
-			if (item.url) {
-				result += `, url: "${item.url}"`;
-			}
-			if (item.children && item.children.length > 0) {
-				result += `,\n${indent}  children: [\n`;
-				// Children are flat - they don't have their own children
-				result += item.children.map((child: NavigationItem) => {
-					let childResult = `${indent}    { title: "${child.title}", url: "${child.url}" }`;
-					return childResult;
-				}).join(',\n');
-				result += `\n${indent}  ]`;
-			}
-			result += ' }';
-			return result;
-		};
-		const pagesArray = settings.navigation.pages.map(page => serializeNavigationItem(page)).join(',\n');
-		// Match from CONFIG:NAVIGATION_PAGES to CONFIG:NAVIGATION_SOCIAL, replacing everything in between
-		// This ensures we capture the entire pages array including nested children
-		const pagesMarker = '// [CONFIG:NAVIGATION_PAGES]';
-		const socialMarker = '// [CONFIG:NAVIGATION_SOCIAL]';
-		const pagesMarkerIndex = modifiedConfig.indexOf(pagesMarker);
-		const socialMarkerIndex = modifiedConfig.indexOf(socialMarker);
-		
-		if (pagesMarkerIndex !== -1 && socialMarkerIndex !== -1) {
-			// Find the start of pages: [ (after the marker)
-			const pagesArrayStart = modifiedConfig.indexOf('pages: [', pagesMarkerIndex);
-			if (pagesArrayStart !== -1) {
-				// Replace from after the marker to before the social marker
-				const before = modifiedConfig.substring(0, pagesMarkerIndex + pagesMarker.length);
-				const after = modifiedConfig.substring(socialMarkerIndex);
-				modifiedConfig = `${before}\n    pages: [\n${pagesArray}\n    ],\n    ${after}`;
-			}
+		// Object-passthrough nav serializer (ADR-005 Phase 3): unknown fields like
+		// i18nKey, urlByLocale, external survive the round-trip — anything the
+		// parser captured for an item is written back verbatim.
+		modifiedConfig = this.replaceNavigationBlock(
+			modifiedConfig,
+			'NAVIGATION_PAGES',
+			'pages',
+			settings.navigation.pages as unknown as Record<string, unknown>[],
+			'// [CONFIG:NAVIGATION_FOOTER]',
+			'// [CONFIG:NAVIGATION_SOCIAL]',
+		);
+
+		// Footer nav (parallel to pages). Only writes when settings has a footer
+		// array — otherwise leave the marker block untouched.
+		if (settings.navigation.footer) {
+			modifiedConfig = this.replaceNavigationBlock(
+				modifiedConfig,
+				'NAVIGATION_FOOTER',
+				'footer',
+				settings.navigation.footer as unknown as Record<string, unknown>[],
+				'// [CONFIG:NAVIGATION_SOCIAL]',
+			);
 		}
-		
+
 		// Update navigation social
 		const socialArray = settings.navigation.social.map((social) => {
 			return `      {\n        title: "${social.title}",\n        url: "${social.url}",\n        icon: "${social.icon}",\n      }`;
@@ -768,8 +830,44 @@ export class ConfigPresetModifier {
 			/\/\/ \[CONFIG:NAVIGATION_SOCIAL\]\s*\n\s*social:\s*\[[\s\S]*?\]/,
 			`// [CONFIG:NAVIGATION_SOCIAL]\n    social: [\n${socialArray},\n    ]`
 		);
-		
+
 		return modifiedConfig;
+	}
+
+	/**
+	 * Replace the body of a `[CONFIG:NAVIGATION_<NAME>]` marker block in config.ts
+	 * with a fresh array, preserving unknown fields on each item. The block is
+	 * bounded by the next listed end-marker (e.g. NAVIGATION_FOOTER, then
+	 * NAVIGATION_SOCIAL) — the first end-marker found in the config wins.
+	 */
+	private replaceNavigationBlock(
+		config: string,
+		markerName: string,
+		fieldName: string,
+		items: Record<string, unknown>[],
+		...endMarkerCandidates: string[]
+	): string {
+		const marker = `// [CONFIG:${markerName}]`;
+		const startIdx = config.indexOf(marker);
+		if (startIdx === -1) return config;
+
+		// Find the nearest end marker after the start. If none exist, do nothing
+		// (safer than mis-bounding the replacement).
+		let endIdx = -1;
+		for (const candidate of endMarkerCandidates) {
+			const idx = config.indexOf(candidate, startIdx + marker.length);
+			if (idx !== -1 && (endIdx === -1 || idx < endIdx)) endIdx = idx;
+		}
+		if (endIdx === -1) return config;
+
+		const itemIndent = '      ';
+		const body = items.length === 0
+			? '[]'
+			: `[\n${items.map((p) => this.serializeNavItem(p, itemIndent)).join(',\n')}\n    ]`;
+
+		const before = config.substring(0, startIdx + marker.length);
+		const after = config.substring(endIdx);
+		return `${before}\n    ${fieldName}: ${body},\n    ${after}`;
 	}
 
 	modifyConfigFromFeatures(settings: AstroModularSettings, currentConfig: string): string {
@@ -968,44 +1066,27 @@ export class ConfigPresetModifier {
 					`// [CONFIG:NAVIGATION_SHOW_MOBILE_MENU]\n    showMobileMenu: ${settings.navigation.showMobileMenu}`
 				);
 			}
-			// Update navigation pages (with nested support)
+			// Object-passthrough nav.pages serializer (ADR-005 Phase 3).
 			if (settings.navigation.pages) {
-				const serializeNavigationItem = (item: { title: string; url?: string; children?: Array<{ title: string; url: string }> }, indent: string = '      '): string => {
-					let result = `${indent}{ title: "${item.title}"`;
-					if (item.url) {
-						result += `, url: "${item.url}"`;
-					}
-					if (item.children && item.children.length > 0) {
-						result += `,\n${indent}  children: [\n`;
-						// Children are flat - they don't have their own children
-						result += item.children.map((child: NavigationItem) => {
-							let childResult = `${indent}    { title: "${child.title}", url: "${child.url}" }`;
-							return childResult;
-						}).join(',\n');
-						result += `\n${indent}  ]`;
-					}
-					result += ' }';
-					return result;
-				};
-				const pagesArray = settings.navigation.pages.map(page => serializeNavigationItem(page as { title: string; url?: string; children?: Array<{ title: string; url: string }> })).join(',\n');
-				const pagesValue = pagesArray ? `[\n${pagesArray}\n    ]` : '[]';
-				// Match from CONFIG:NAVIGATION_PAGES to CONFIG:NAVIGATION_SOCIAL, replacing everything in between
-				// This ensures we capture the entire pages array including nested children
-				const pagesMarker = '// [CONFIG:NAVIGATION_PAGES]';
-				const socialMarker = '// [CONFIG:NAVIGATION_SOCIAL]';
-				const pagesMarkerIndex = modifiedConfig.indexOf(pagesMarker);
-				const socialMarkerIndex = modifiedConfig.indexOf(socialMarker);
-				
-				if (pagesMarkerIndex !== -1 && socialMarkerIndex !== -1) {
-					// Find the start of pages: [ (after the marker)
-					const pagesArrayStart = modifiedConfig.indexOf('pages: [', pagesMarkerIndex);
-					if (pagesArrayStart !== -1) {
-						// Replace from after the marker to before the social marker
-						const before = modifiedConfig.substring(0, pagesMarkerIndex + pagesMarker.length);
-						const after = modifiedConfig.substring(socialMarkerIndex);
-						modifiedConfig = `${before}\n    pages: ${pagesValue},\n    ${after}`;
-					}
-				}
+				modifiedConfig = this.replaceNavigationBlock(
+					modifiedConfig,
+					'NAVIGATION_PAGES',
+					'pages',
+					settings.navigation.pages as unknown as Record<string, unknown>[],
+					'// [CONFIG:NAVIGATION_FOOTER]',
+					'// [CONFIG:NAVIGATION_SOCIAL]',
+				);
+			}
+
+			// Object-passthrough nav.footer serializer (ADR-005 Phase 3).
+			if (settings.navigation.footer) {
+				modifiedConfig = this.replaceNavigationBlock(
+					modifiedConfig,
+					'NAVIGATION_FOOTER',
+					'footer',
+					settings.navigation.footer as unknown as Record<string, unknown>[],
+					'// [CONFIG:NAVIGATION_SOCIAL]',
+				);
 			}
 			// Update navigation social
 			if (settings.navigation.social) {

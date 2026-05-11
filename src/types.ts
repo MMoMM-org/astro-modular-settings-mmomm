@@ -74,15 +74,34 @@ export interface AstroModularSettings {
 	removeRibbonIcon: boolean;
 }
 
+/**
+ * Locale identifier (e.g. 'de', 'en'). The plugin is locale-agnostic — the
+ * authoritative locale list lives in `siteInfo.locales` (sourced from the
+ * site's [CONFIG:LOCALES] marker).
+ */
+export type Locale = string;
+
+/**
+ * Per-locale string value. Each key is a locale identifier from `siteInfo.locales`.
+ * The plugin accepts either shape (`string` or `LocalisedString`) on read; the
+ * UI writes `LocalisedString` when more than one locale is configured.
+ */
+export type LocalisedString = Record<Locale, string>;
+
 export interface SiteInformation {
 	site: string;
-	title: string;
-	homepageTitle: string;
-	description: string;
+	title: string | LocalisedString;
+	homepageTitle: string | LocalisedString;
+	description: string | LocalisedString;
 	author: string;
-	language: string;
+	/** @deprecated Use `locales` + `defaultLocale`. Legacy single-locale field. */
+	language?: string;
+	/** Configured locales (e.g. ['de', 'en']). Sourced from [CONFIG:LOCALES]. */
+	locales?: Locale[];
+	/** Default locale (root URLs in the site). Sourced from [CONFIG:DEFAULT_LOCALE]. */
+	defaultLocale?: Locale;
 	faviconThemeAdaptive?: boolean;
-	defaultOgImageAlt?: string;
+	defaultOgImageAlt?: string | LocalisedString;
 }
 
 export interface LayoutSettings {
@@ -96,7 +115,7 @@ export interface TableOfContentsSettings {
 
 export interface FooterSettings {
 	enabled: boolean;
-	content: string;
+	content: string | LocalisedString;
 	showSocialIconsInFooter: boolean;
 }
 
@@ -105,9 +124,23 @@ export interface SeoSettings {
 }
 
 export interface NavigationItem {
-	title: string;
-	url?: string;  // Optional - if missing, item is dropdown-only
+	title: string | LocalisedString;
+	/** T9 strings-table key (in src/i18n/strings.ts) for the translated label. */
+	i18nKey?: string;
+	/** Canonical/default-locale URL. Optional — if missing, item is dropdown-only. */
+	url?: string;
+	/** Per-locale URL override. When present for a locale, this URL is used verbatim. */
+	urlByLocale?: Record<Locale, string>;
+	/** External link flag — suppresses locale-prefix logic in the site's navUrl resolver. */
+	external?: boolean;
+	icon?: string;
 	children?: NavigationItem[];  // Single level only
+	/**
+	 * Passthrough escape hatch — the round-trip parser/serializer preserves any
+	 * unknown fields it finds in config.ts so theme-side extensions to NavigationItem
+	 * survive a plugin write.
+	 */
+	[key: string]: unknown;
 }
 
 export interface NavigationSettings {
@@ -115,6 +148,8 @@ export interface NavigationSettings {
 	style: 'minimal' | 'traditional';
 	showMobileMenu: boolean;
 	pages: NavigationItem[];
+	/** Footer navigation items (legal links etc.). Parallels `pages`. */
+	footer?: NavigationItem[];
 	social: Array<{ title: string; url: string; icon: string }>;
 }
 
@@ -234,7 +269,7 @@ export interface OptionalFeatures {
 export interface ProfilePictureSettings {
 	enabled: boolean;
 	image: string;
-	alt: string;
+	alt: string | LocalisedString;
 	size: 'sm' | 'md' | 'lg';
 	url?: string;
 	placement: 'footer' | 'header';
@@ -447,6 +482,8 @@ export const DEFAULT_SETTINGS: AstroModularSettings = {
 		description: 'A flexible blog theme designed for Obsidian users.',
 		author: 'David V. Kimball',
 		language: 'en',
+		locales: ['en'],
+		defaultLocale: 'en',
 		faviconThemeAdaptive: true,
 		defaultOgImageAlt: 'Astro Modular logo.',
 	},

@@ -66,9 +66,168 @@ export class ConfigFileManager {
 
 	private validateConfigContent(content: string): boolean {
 		// Basic validation - check for common Astro config patterns
-		return content.includes('defineConfig') || 
+		return content.includes('defineConfig') ||
 			   content.includes('export default') ||
 			   content.includes('astro/config');
+	}
+
+	/**
+	 * Generic recursive-descent parser for TypeScript object/array/primitive literals
+	 * embedded in config.ts. Used to read NavigationItem entries (with arbitrary
+	 * unknown fields preserved) and LocalisedString values, without having to
+	 * hand-write per-field regex extractors.
+	 *
+	 * Returns the parsed JS value and the position immediately after it.
+	 * Whitespace at startPos is consumed.
+	 */
+	private parseTsValue(content: string, startPos: number): { value: unknown; endPos: number } {
+		let pos = startPos;
+		while (pos < content.length && /\s/.test(content[pos])) pos++;
+		const ch = content[pos];
+
+		// String "..."
+		if (ch === '"' || ch === "'") {
+			const quote = ch;
+			let end = pos + 1;
+			while (end < content.length && content[end] !== quote) {
+				if (content[end] === '\\' && end + 1 < content.length) end += 2;
+				else end++;
+			}
+			return { value: content.slice(pos + 1, end), endPos: end + 1 };
+		}
+
+		// Template literal `...` (no interpolation handling — used for footer.content HTML)
+		if (ch === '`') {
+			let end = pos + 1;
+			while (end < content.length && content[end] !== '`') {
+				if (content[end] === '\\' && end + 1 < content.length) end += 2;
+				else end++;
+			}
+			return { value: content.slice(pos + 1, end), endPos: end + 1 };
+		}
+
+		// Object literal
+		if (ch === '{') {
+			return this.parseTsObject(content, pos);
+		}
+
+		// Array literal
+		if (ch === '[') {
+			return this.parseTsArray(content, pos);
+		}
+
+		// Boolean / null / undefined
+		const wordMatch = content.slice(pos).match(/^(true|false|null|undefined)\b/);
+		if (wordMatch) {
+			const w = wordMatch[1];
+			const value = w === 'true' ? true : w === 'false' ? false : w === 'null' ? null : undefined;
+			return { value, endPos: pos + w.length };
+		}
+
+		// Number
+		const numMatch = content.slice(pos).match(/^-?\d+(?:\.\d+)?/);
+		if (numMatch) {
+			return { value: parseFloat(numMatch[0]), endPos: pos + numMatch[0].length };
+		}
+
+		// Identifier (variable reference, e.g. `siteConfig.foo`) — capture as a raw
+		// passthrough string so the writer can reproduce it verbatim.
+		const identMatch = content.slice(pos).match(/^[A-Za-z_$][\w$.]*/);
+		if (identMatch) {
+			return { value: { __raw: identMatch[0] }, endPos: pos + identMatch[0].length };
+		}
+
+		// Unknown — advance one char to avoid infinite loops.
+		return { value: null, endPos: pos + 1 };
+	}
+
+	private parseTsObject(content: string, startPos: number): { value: Record<string, unknown>; endPos: number } {
+		let pos = startPos;
+		const obj: Record<string, unknown> = {};
+		if (content[pos] !== '{') return { value: obj, endPos: pos };
+		pos++;
+
+		while (pos < content.length) {
+			while (pos < content.length && /\s/.test(content[pos])) pos++;
+			if (content[pos] === '}') { pos++; break; }
+
+			// Optional spread `...foo` — passthrough as raw key.
+			const spreadMatch = content.slice(pos).match(/^\.\.\.[A-Za-z_$][\w$.]*/);
+			if (spreadMatch) {
+				obj['__spread__' + spreadMatch[0]] = { __raw: spreadMatch[0] };
+				pos += spreadMatch[0].length;
+				while (pos < content.length && /\s/.test(content[pos])) pos++;
+				if (content[pos] === ',') pos++;
+				continue;
+			}
+
+			// Key: identifier or "quoted"
+			const keyMatch = content.slice(pos).match(/^(?:"([^"]+)"|'([^']+)'|([A-Za-z_$][\w$]*))\s*:\s*/);
+			if (!keyMatch) { pos++; continue; }
+			const key = keyMatch[1] ?? keyMatch[2] ?? keyMatch[3];
+			pos += keyMatch[0].length;
+
+			const v = this.parseTsValue(content, pos);
+			obj[key] = v.value;
+			pos = v.endPos;
+
+			while (pos < content.length && /\s/.test(content[pos])) pos++;
+			if (content[pos] === ',') pos++;
+		}
+		return { value: obj, endPos: pos };
+	}
+
+	private parseTsArray(content: string, startPos: number): { value: unknown[]; endPos: number } {
+		let pos = startPos;
+		const arr: unknown[] = [];
+		if (content[pos] !== '[') return { value: arr, endPos: pos };
+		pos++;
+
+		while (pos < content.length) {
+			while (pos < content.length && /\s/.test(content[pos])) pos++;
+			if (content[pos] === ']') { pos++; break; }
+
+			const v = this.parseTsValue(content, pos);
+			arr.push(v.value);
+			pos = v.endPos;
+
+			while (pos < content.length && /\s/.test(content[pos])) pos++;
+			if (content[pos] === ',') pos++;
+		}
+		return { value: arr, endPos: pos };
+	}
+
+	/**
+	 * Parse a marker-anchored value that might be a string or a LocalisedString
+	 * object literal. Returns the parsed value (string | Record<string,string>) or
+	 * undefined when the marker is absent. Used for site-info fields that gained
+	 * LocalisedString shape in ADR-005.
+	 */
+	private parseStringOrLocalised(content: string, marker: string, fieldName: string): string | Record<string, string> | undefined {
+		const markerLine = `// [${marker}]`;
+		const markerIdx = content.indexOf(markerLine);
+		if (markerIdx === -1) return undefined;
+
+		// Find the field after the marker
+		const fieldRegex = new RegExp(`${fieldName}\\s*:\\s*`);
+		const after = content.slice(markerIdx + markerLine.length);
+		const fieldMatch = after.match(fieldRegex);
+		if (!fieldMatch || fieldMatch.index === undefined) return undefined;
+
+		const valueStart = markerIdx + markerLine.length + fieldMatch.index + fieldMatch[0].length;
+		const { value } = this.parseTsValue(content, valueStart);
+
+		if (typeof value === 'string') return value;
+		if (value && typeof value === 'object' && !Array.isArray(value)) {
+			// Filter to entries with string values only — that's the LocalisedString shape.
+			const obj = value as Record<string, unknown>;
+			const out: Record<string, string> = {};
+			for (const [k, v] of Object.entries(obj)) {
+				if (typeof v === 'string') out[k] = v;
+			}
+			if (Object.keys(out).length > 0) return out;
+		}
+		return undefined;
 	}
 
 	readConfig(): string {
@@ -132,41 +291,57 @@ export class ConfigFileManager {
 			siteInfo.site = siteUrlMatch[1];
 		}
 		
-		const siteTitleMatch = configContent.match(/\/\/ \[CONFIG:SITE_TITLE\]\s*\n\s*title:\s*"([^"]*)"/);
-		if (siteTitleMatch) {
-			siteInfo.title = siteTitleMatch[1];
-		}
+		// Title / description / homepageTitle / defaultOgImageAlt accept either
+		// `"string"` or `{ de: "...", en: "..." }` shapes (ADR-005 Decision 3).
+		const siteTitle = this.parseStringOrLocalised(configContent, 'CONFIG:SITE_TITLE', 'title');
+		if (siteTitle !== undefined) siteInfo.title = siteTitle;
 
-		const homepageTitleMatch = configContent.match(/\/\/ \[CONFIG:HOMEPAGE_TITLE\]\s*\n\s*homepageTitle:\s*"([^"]*)"/);
-		if (homepageTitleMatch) {
-			siteInfo.homepageTitle = homepageTitleMatch[1];
-		}
+		const homepageTitle = this.parseStringOrLocalised(configContent, 'CONFIG:HOMEPAGE_TITLE', 'homepageTitle');
+		if (homepageTitle !== undefined) siteInfo.homepageTitle = homepageTitle;
 
-		const siteDescMatch = configContent.match(/\/\/ \[CONFIG:SITE_DESCRIPTION\]\s*\n\s*description:\s*"([^"]*)"/);
-		if (siteDescMatch) {
-			siteInfo.description = siteDescMatch[1];
-		}
-		
+		const siteDesc = this.parseStringOrLocalised(configContent, 'CONFIG:SITE_DESCRIPTION', 'description');
+		if (siteDesc !== undefined) siteInfo.description = siteDesc;
+
 		const siteAuthorMatch = configContent.match(/\/\/ \[CONFIG:SITE_AUTHOR\]\s*\n\s*author:\s*"([^"]*)"/);
 		if (siteAuthorMatch) {
 			siteInfo.author = siteAuthorMatch[1];
 		}
-		
+
+		// Locale source-of-truth: prefer [CONFIG:LOCALES] + [CONFIG:DEFAULT_LOCALE]
+		// pair; fall back to legacy [CONFIG:SITE_LANGUAGE] for single-locale configs.
+		const localesMarkerIdx = configContent.indexOf('// [CONFIG:LOCALES]');
+		if (localesMarkerIdx !== -1) {
+			const after = configContent.slice(localesMarkerIdx + '// [CONFIG:LOCALES]'.length);
+			const fieldMatch = after.match(/locales\s*:\s*/);
+			if (fieldMatch && fieldMatch.index !== undefined) {
+				const valueStart = localesMarkerIdx + '// [CONFIG:LOCALES]'.length + fieldMatch.index + fieldMatch[0].length;
+				const { value } = this.parseTsValue(configContent, valueStart);
+				if (Array.isArray(value)) {
+					siteInfo.locales = value.filter((v): v is string => typeof v === 'string');
+				}
+			}
+		}
+		const defaultLocaleMatch = configContent.match(/\/\/ \[CONFIG:DEFAULT_LOCALE\]\s*\n\s*defaultLocale:\s*['"]([^'"]+)['"]/);
+		if (defaultLocaleMatch) {
+			siteInfo.defaultLocale = defaultLocaleMatch[1];
+		}
 		const siteLangMatch = configContent.match(/\/\/ \[CONFIG:SITE_LANGUAGE\]\s*\n\s*language:\s*"([^"]*)"/);
 		if (siteLangMatch) {
 			siteInfo.language = siteLangMatch[1];
+			// Backfill locales/defaultLocale from legacy single-locale field when
+			// the new markers are absent — keeps existing single-locale sites working.
+			if (!siteInfo.locales) siteInfo.locales = [siteLangMatch[1]];
+			if (!siteInfo.defaultLocale) siteInfo.defaultLocale = siteLangMatch[1];
 		}
 		config.siteInfo = siteInfo;
-		
+
 		const faviconThemeAdaptiveMatch = configContent.match(/\/\/ \[CONFIG:FAVICON_THEME_ADAPTIVE\]\s*\n\s*faviconThemeAdaptive:\s*(true|false)/);
 		if (faviconThemeAdaptiveMatch) {
 			config.faviconThemeAdaptive = faviconThemeAdaptiveMatch[1] === 'true';
 		}
-		
-		const defaultOgImageAltMatch = configContent.match(/\/\/ \[CONFIG:DEFAULT_OG_IMAGE_ALT\]\s*\n\s*defaultOgImageAlt:\s*"([^"]*)"/);
-		if (defaultOgImageAltMatch) {
-			config.defaultOgImageAlt = defaultOgImageAltMatch[1];
-		}
+
+		const defaultOgImageAlt = this.parseStringOrLocalised(configContent, 'CONFIG:DEFAULT_OG_IMAGE_ALT', 'defaultOgImageAlt');
+		if (defaultOgImageAlt !== undefined) config.defaultOgImageAlt = defaultOgImageAlt;
 
 		// Extract theme
 		const themeMatch = configContent.match(/\/\/ \[CONFIG:THEME\]\s*\n\s*theme:\s*"([^"]*)"/);
@@ -219,123 +394,28 @@ export class ConfigFileManager {
 
 		// Extract navigation settings
 		const navigation: Record<string, unknown> = { pages: [], social: [] };
-		
-		// Extract navigation pages (supports nested structure, stop before the next config parameter)
-		const pagesMatch = configContent.match(/\/\/ \[CONFIG:NAVIGATION_PAGES\]\s*\n\s*pages:\s*\[([\s\S]*?)\],?\s*(?=\/\/ \[CONFIG:NAVIGATION_SOCIAL\])/);
+
+		// Navigation pages: the generic parseTsArray preserves arbitrary fields
+		// (i18nKey, urlByLocale, external, etc.) instead of stripping anything that
+		// isn't title/url/children. Wrap the marker-extracted body in brackets so
+		// parseTsArray sees a proper array literal.
+		const pagesMatch = configContent.match(/\/\/ \[CONFIG:NAVIGATION_PAGES\]\s*\n\s*pages:\s*\[([\s\S]*?)\],?\s*(?=\/\/ \[CONFIG:NAVIGATION_(?:FOOTER|SOCIAL)\])/);
 		if (pagesMatch) {
-			const pagesContent = pagesMatch[1];
-			
-			// Parse navigation items (supports nested children)
-			const parseNavigationItem = (content: string, startPos: number = 0): { item: Record<string, unknown> | null, endPos: number } => {
-				let pos = startPos;
-				const item: Record<string, unknown> = {};
-				
-				// Skip whitespace
-				while (pos < content.length && /\s/.test(content[pos])) pos++;
-				
-				// Find opening brace
-				if (content[pos] !== '{') {
-					return { item: null, endPos: pos };
-				}
-				pos++;
-				
-				// Parse fields
-				while (pos < content.length) {
-					// Skip whitespace
-					while (pos < content.length && /\s/.test(content[pos])) pos++;
-					
-					// Check for closing brace
-					if (content[pos] === '}') {
-						pos++;
-						break;
-					}
-					
-					// Parse field name
-					const fieldMatch = content.slice(pos).match(/^(\w+):\s*/);
-					if (!fieldMatch) {
-						pos++;
-						continue;
-					}
-					const fieldName = fieldMatch[1];
-					pos += fieldMatch[0].length;
-					
-					// Parse field value
-					if (fieldName === 'title' || fieldName === 'url') {
-						const valueMatch = content.slice(pos).match(/^"([^"]*)"/);
-						if (valueMatch) {
-							item[fieldName] = valueMatch[1];
-							pos += valueMatch[0].length;
-						}
-					} else if (fieldName === 'children') {
-						// Parse children array
-						pos++; // skip '['
-						const children: Array<Record<string, unknown>> = [];
-						while (pos < content.length) {
-							// Skip whitespace
-							while (pos < content.length && /\s/.test(content[pos])) pos++;
-							
-							// Check for closing bracket
-							if (content[pos] === ']') {
-								pos++;
-								break;
-							}
-							
-							// Parse child item
-							const childResult = parseNavigationItem(content, pos);
-							if (childResult.item) {
-								children.push(childResult.item);
-								pos = childResult.endPos;
-							} else {
-								break;
-							}
-							
-							// Skip comma
-							while (pos < content.length && /\s/.test(content[pos])) pos++;
-							if (content[pos] === ',') pos++;
-						}
-						item.children = children;
-					}
-					
-					// Skip comma
-					while (pos < content.length && /\s/.test(content[pos])) pos++;
-					if (content[pos] === ',') pos++;
-				}
-				
-				return { item, endPos: pos };
-			};
-			
-			// Parse all pages
-			let pos = 0;
-			while (pos < pagesContent.length) {
-				// Skip whitespace
-				while (pos < pagesContent.length && /\s/.test(pagesContent[pos])) pos++;
-				
-				// Check for end of array
-				if (pos >= pagesContent.length || pagesContent[pos] === ']') break;
-				
-				// Parse item
-				const result = parseNavigationItem(pagesContent, pos);
-				if (result.item) {
-					(navigation.pages as Array<Record<string, unknown>>).push(result.item);
-					pos = result.endPos;
-				} else {
-					// Fallback to simple regex for backward compatibility
-					const simpleMatch = pagesContent.slice(pos).match(/\{\s*title:\s*"([^"]*)",\s*url:\s*"([^"]*)"\s*\}/);
-					if (simpleMatch) {
-						(navigation.pages as Array<Record<string, unknown>>).push({
-							title: simpleMatch[1],
-							url: simpleMatch[2]
-						});
-						pos += simpleMatch[0].length;
-					} else {
-						break;
-					}
-				}
-				
-				// Skip comma
-				while (pos < pagesContent.length && /\s/.test(pagesContent[pos])) pos++;
-				if (pagesContent[pos] === ',') pos++;
-			}
+			const { value } = this.parseTsArray(`[${pagesMatch[1]}]`, 0);
+			navigation.pages = (value as unknown[]).filter(
+				(v): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v)
+			);
+		}
+
+		// Navigation footer: optional, parallel shape to NAVIGATION_PAGES. Bounded
+		// either by NAVIGATION_SOCIAL (when footer comes before social) or by the
+		// closing bracket of the navigation object.
+		const footerMatch = configContent.match(/\/\/ \[CONFIG:NAVIGATION_FOOTER\]\s*\n\s*footer:\s*\[([\s\S]*?)\],?\s*(?=\/\/ \[CONFIG:NAVIGATION_SOCIAL\]|\}\s*,|\}\s*\))/);
+		if (footerMatch) {
+			const { value } = this.parseTsArray(`[${footerMatch[1]}]`, 0);
+			navigation.footer = (value as unknown[]).filter(
+				(v): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v)
+			);
 		}
 		
 		// Extract navigation social
@@ -419,8 +499,17 @@ export class ConfigFileManager {
 
 		// Extract footer settings
 		const footer: Record<string, unknown> = {};
-		
-		const footerSocialMatch = configContent.match(/\/\/ \[CONFIG:FOOTER_SHOW_SOCIAL_ICONS\]\s*showSocialIconsInFooter:\s*(true|false)/);
+
+		const footerEnabledMatch = configContent.match(/\/\/ \[CONFIG:FOOTER_ENABLED\]\s*\n?\s*enabled:\s*(true|false)/);
+		if (footerEnabledMatch) {
+			footer.enabled = footerEnabledMatch[1] === 'true';
+		}
+
+		// footer.content: legacy template literal `...` or new LocalisedString { de: "...", en: "..." }.
+		const footerContent = this.parseStringOrLocalised(configContent, 'CONFIG:FOOTER_CONTENT', 'content');
+		if (footerContent !== undefined) footer.content = footerContent;
+
+		const footerSocialMatch = configContent.match(/\/\/ \[CONFIG:FOOTER_SHOW_SOCIAL_ICONS\]\s*\n?\s*showSocialIconsInFooter:\s*(true|false)/);
 		if (footerSocialMatch) {
 			footer.showSocialIconsInFooter = footerSocialMatch[1] === 'true';
 		}

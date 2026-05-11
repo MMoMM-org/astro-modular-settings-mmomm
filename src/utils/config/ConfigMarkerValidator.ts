@@ -5,7 +5,9 @@ export class ConfigMarkerValidator {
 			'CONFIG:SITE_TITLE',
 			'CONFIG:SITE_DESCRIPTION',
 			'CONFIG:SITE_AUTHOR',
-			'CONFIG:SITE_LANGUAGE',
+			// CONFIG:SITE_LANGUAGE replaced by CONFIG:LOCALES + CONFIG:DEFAULT_LOCALE
+			// (ADR-005 Decision 2 in MMoMM-org/astro-modular-settings-mmomm). Backward
+			// compatibility: validator accepts either the legacy or the new marker pair.
 			'CONFIG:THEME',
 			'CONFIG:AVAILABLE_THEMES',
 			'CONFIG:FONT_SOURCE',
@@ -46,6 +48,8 @@ export class ConfigMarkerValidator {
 			'CONFIG:NAVIGATION_SHOW_MOBILE_MENU',
 			'CONFIG:NAVIGATION_PAGES',
 			'CONFIG:NAVIGATION_SOCIAL',
+			// CONFIG:NAVIGATION_FOOTER is optional (parallel to NAVIGATION_PAGES) —
+			// some sites don't expose a footer nav. Validator doesn't require it.
 			'CONFIG:OPTIONAL_CONTENT_TYPES_PROJECTS',
 			'CONFIG:OPTIONAL_CONTENT_TYPES_DOCS',
 			'CONFIG:HOME_OPTIONS_FEATURED_POST_ENABLED',
@@ -88,10 +92,21 @@ export class ConfigMarkerValidator {
 			'CONFIG:POST_OPTIONS_COMMENTS_LOADING'
 		];
 		
-		const missing = requiredMarkers.filter(marker => 
+		const missing = requiredMarkers.filter(marker =>
 			!config.includes(`// [${marker}]`)
 		);
-		
+
+		// Locale marker pair: require either legacy CONFIG:SITE_LANGUAGE, OR the new
+		// CONFIG:LOCALES + CONFIG:DEFAULT_LOCALE pair. This lets a single plugin
+		// build support both single-locale and multi-locale sites without forcing a
+		// schema migration on existing single-locale users.
+		const hasLegacy = config.includes('// [CONFIG:SITE_LANGUAGE]');
+		const hasLocales = config.includes('// [CONFIG:LOCALES]');
+		const hasDefaultLocale = config.includes('// [CONFIG:DEFAULT_LOCALE]');
+		if (!hasLegacy && !(hasLocales && hasDefaultLocale)) {
+			missing.push('CONFIG:SITE_LANGUAGE (or CONFIG:LOCALES + CONFIG:DEFAULT_LOCALE)');
+		}
+
 		return { valid: missing.length === 0, missing };
 	}
 
