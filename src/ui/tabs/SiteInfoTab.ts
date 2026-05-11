@@ -1,6 +1,6 @@
 import { Notice, Modal, setIcon, Setting , SettingGroup} from 'obsidian';
 import { TabRenderer } from '../common/TabRenderer';
-import { AstroModularPlugin, ObsidianVaultAdapter } from '../../types';
+import { AstroModularPlugin, ObsidianVaultAdapter, lt } from '../../types';
 
 // Buffer is available in Node.js environment
 // Buffer is available in Node.js environment
@@ -42,19 +42,26 @@ export class SiteInfoTab extends TabRenderer {
 				});
 		});
 
+		const defaultLocale = settings.siteInfo?.defaultLocale ?? 'en';
+
 		// Site Title
 		siteInfoGroup.addSetting(setting => {
 			setting
 				.setName('Site title')
 				.setDesc('Your site\'s title')
 				.addText(text => {
-					text.setValue(settings.siteInfo.title);
+					text.setValue(lt(settings.siteInfo.title, defaultLocale));
 					let timeoutId: number | null = null;
 					text.onChange(value => {
 						if (timeoutId) {
 							clearTimeout(timeoutId);
 						}
-						settings.siteInfo.title = value;
+						// Preserve LocalisedString shape if present.
+						if (typeof settings.siteInfo.title === 'object' && settings.siteInfo.title !== null) {
+							(settings.siteInfo.title as Record<string, string>)[defaultLocale] = value;
+						} else {
+							settings.siteInfo.title = value;
+						}
 						void this.plugin.saveData(settings);
 						timeoutId = window.setTimeout(() => {
 							void this.applyCurrentConfiguration();
@@ -75,13 +82,17 @@ export class SiteInfoTab extends TabRenderer {
 				.setName('Homepage title')
 				.setDesc('Custom meta title for the homepage only. If empty, uses the site title.')
 				.addText(text => {
-					text.setValue(settings.siteInfo.homepageTitle ?? '');
+					text.setValue(lt(settings.siteInfo.homepageTitle, defaultLocale));
 					let timeoutId: number | null = null;
 					text.onChange(value => {
 						if (timeoutId) {
 							clearTimeout(timeoutId);
 						}
-						settings.siteInfo.homepageTitle = value;
+						if (typeof settings.siteInfo.homepageTitle === 'object' && settings.siteInfo.homepageTitle !== null) {
+							(settings.siteInfo.homepageTitle as Record<string, string>)[defaultLocale] = value;
+						} else {
+							settings.siteInfo.homepageTitle = value;
+						}
 						void this.plugin.saveData(settings);
 						timeoutId = window.setTimeout(() => {
 							void this.applyCurrentConfiguration();
@@ -102,13 +113,17 @@ export class SiteInfoTab extends TabRenderer {
 				.setName('Site description')
 				.setDesc('A brief description of your site')
 				.addText(text => {
-					text.setValue(settings.siteInfo.description);
+					text.setValue(lt(settings.siteInfo.description, defaultLocale));
 					let timeoutId: number | null = null;
 					text.onChange(value => {
 						if (timeoutId) {
 							clearTimeout(timeoutId);
 						}
-						settings.siteInfo.description = value;
+						if (typeof settings.siteInfo.description === 'object' && settings.siteInfo.description !== null) {
+							(settings.siteInfo.description as Record<string, string>)[defaultLocale] = value;
+						} else {
+							settings.siteInfo.description = value;
+						}
 						void this.plugin.saveData(settings);
 						timeoutId = window.setTimeout(() => {
 							void this.applyCurrentConfiguration();
@@ -157,7 +172,7 @@ export class SiteInfoTab extends TabRenderer {
 				// eslint-disable-next-line obsidianmd/ui/sentence-case
 				.setDesc('Your site\'s primary language (ISO 639-1 code)')
 				.addText(text => {
-					text.setValue(settings.siteInfo.language);
+					text.setValue(settings.siteInfo.language ?? settings.siteInfo.defaultLocale ?? 'en');
 					let timeoutId: number | null = null;
 					text.onChange(value => {
 						if (timeoutId) {
@@ -386,13 +401,17 @@ export class SiteInfoTab extends TabRenderer {
 				// eslint-disable-next-line obsidianmd/ui/sentence-case
 				.setDesc('Alternative text for the Open Graph image')
 				.addText(text => {
-					text.setValue(settings.siteInfo.defaultOgImageAlt || settings.seo?.defaultOgImageAlt || 'Astro Modular logo.');
+					text.setValue(lt(settings.siteInfo.defaultOgImageAlt, defaultLocale) || lt(settings.seo?.defaultOgImageAlt, defaultLocale) || 'Astro Modular logo.');
 					let timeoutId: number | null = null;
 					text.onChange(value => {
 						if (timeoutId) {
 							clearTimeout(timeoutId);
 						}
-						settings.siteInfo.defaultOgImageAlt = value;
+						if (typeof settings.siteInfo.defaultOgImageAlt === 'object' && settings.siteInfo.defaultOgImageAlt !== null) {
+							(settings.siteInfo.defaultOgImageAlt as Record<string, string>)[defaultLocale] = value;
+						} else {
+							settings.siteInfo.defaultOgImageAlt = value;
+						}
 						if (!settings.seo) {
 							settings.seo = { defaultOgImageAlt: '' };
 						}

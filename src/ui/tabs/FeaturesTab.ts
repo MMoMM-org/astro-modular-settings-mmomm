@@ -1,6 +1,6 @@
 import { Setting, Notice , SettingGroup} from 'obsidian';
 import { TabRenderer } from '../common/TabRenderer';
-import { AstroModularPlugin, AstroModularSettings, ProfilePictureSettings } from '../../types';
+import { AstroModularPlugin, AstroModularSettings, ProfilePictureSettings, lt } from '../../types';
 
 // MOCKED: SettingsContainer type
 type SettingsContainer = { addSetting: (cb: (setting: Setting) => void) => void };
@@ -162,7 +162,7 @@ export class FeaturesTab extends TabRenderer {
 					rows: '3'
 				}
 			});
-			textarea.value = settings.footer?.content || '© 2025 {author}. Built with the <a href="https://github.com/davidvkimball/astro-modular" target="_blank">Astro Modular</a> theme.';
+			textarea.value = lt(settings.footer?.content, settings.siteInfo?.defaultLocale ?? 'en') || '© 2025 {author}. Built with the <a href="https://github.com/davidvkimball/astro-modular" target="_blank">Astro Modular</a> theme.';
 			
 			textarea.setCssProps({
 				width: '100%',
@@ -1454,9 +1454,16 @@ export class FeaturesTab extends TabRenderer {
 				optionsGrid,
 				'Alt text',
 				'Alternative text for the profile picture',
-				profileSettings.alt,
+				lt(profileSettings.alt, settings.siteInfo?.defaultLocale ?? 'en'),
 				(value) => {
-					profileSettings.alt = value;
+					// Preserve LocalisedString shape when present — write the default-locale
+					// slot instead of overwriting the whole object with a string.
+					const defaultLocale = settings.siteInfo?.defaultLocale ?? 'en';
+					if (typeof profileSettings.alt === 'object' && profileSettings.alt !== null) {
+						(profileSettings.alt as Record<string, string>)[defaultLocale] = value;
+					} else {
+						profileSettings.alt = value;
+					}
 				},
 				1000,
 				async () => {

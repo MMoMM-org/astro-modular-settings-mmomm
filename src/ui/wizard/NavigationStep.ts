@@ -1,6 +1,6 @@
 import { BaseWizardStep } from './BaseWizardStep';
 import { setIcon } from 'obsidian';
-import { NavigationItem } from '../../types';
+import { NavigationItem, lt } from '../../types';
 
 // Type for elements with custom event handlers
 interface ElementWithHandlers extends HTMLElement {
@@ -79,8 +79,8 @@ export class NavigationStep extends BaseWizardStep {
 			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			attr: { placeholder: 'Page Title', draggable: 'false' }
 		});
-		titleInput.value = page.title || '';
-		
+		titleInput.value = lt(page.title, 'en');
+
 		const urlInput = itemFields.createEl('input', {
 			type: 'text',
 			cls: 'nav-url',
@@ -132,8 +132,8 @@ export class NavigationStep extends BaseWizardStep {
 			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			attr: { placeholder: 'Child Title', draggable: 'false' }
 		});
-		titleInput.value = child.title || '';
-		
+		titleInput.value = lt(child.title, 'en');
+
 		const urlInput = itemFields.createEl('input', {
 			type: 'text',
 			cls: 'nav-child-url',

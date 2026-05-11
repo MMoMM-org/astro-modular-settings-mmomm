@@ -1,4 +1,4 @@
-import { AstroModularSettings } from '../../types';
+import { AstroModularSettings, lt } from '../../types';
 
 export class ConfigTemplateManager {
 	private interpolateTemplate(template: string, settings: AstroModularSettings, templateName: string): string {
@@ -16,7 +16,7 @@ export class ConfigTemplateManager {
 			.replace(/\$\{settings\.optionalFeatures\.comments\.enabled\}/g, settings.optionalFeatures.comments.enabled.toString())
 			.replace(/\$\{settings\.optionalFeatures\.profilePicture\.enabled\}/g, settings.optionalFeatures.profilePicture.enabled.toString())
 			.replace(/\$\{settings\.optionalFeatures\.profilePicture\.image\}/g, settings.optionalFeatures.profilePicture.image)
-			.replace(/\$\{settings\.optionalFeatures\.profilePicture\.alt\}/g, settings.optionalFeatures.profilePicture.alt)
+			.replace(/\$\{settings\.optionalFeatures\.profilePicture\.alt\}/g, lt(settings.optionalFeatures.profilePicture.alt, settings.siteInfo?.defaultLocale ?? 'en'))
 			.replace(/\$\{settings\.optionalFeatures\.profilePicture\.size\}/g, settings.optionalFeatures.profilePicture.size)
 			.replace(/\$\{settings\.optionalFeatures\.profilePicture\.url\}/g, settings.optionalFeatures.profilePicture.url || '')
 			.replace(/\$\{settings\.optionalFeatures\.profilePicture\.placement\}/g, settings.optionalFeatures.profilePicture.placement)

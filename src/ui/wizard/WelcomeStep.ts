@@ -1,4 +1,5 @@
 import { BaseWizardStep } from './BaseWizardStep';
+import { lt } from '../../types';
 
 export class WelcomeStep extends BaseWizardStep {
 	render(container: HTMLElement): void {
@@ -40,7 +41,7 @@ export class WelcomeStep extends BaseWizardStep {
 		// False positive: "Astro Modular" is a proper noun (theme name) - placeholder value
 		// eslint-disable-next-line obsidianmd/ui/sentence-case
 		titleInput.placeholder = 'Astro Modular';
-		titleInput.setAttribute('value', state.selectedSiteInfo.title);
+		titleInput.setAttribute('value', lt(state.selectedSiteInfo.title, state.selectedSiteInfo.defaultLocale ?? state.selectedSiteInfo.language ?? 'en'));
 		
 		const descGroup = siteInfoForm.createDiv('form-group');
 		const descLabel = descGroup.createEl('label', { text: 'Description' });
@@ -48,7 +49,7 @@ export class WelcomeStep extends BaseWizardStep {
 		const descInput = descGroup.createEl('input', { type: 'text' });
 		descInput.id = 'site-description';
 		descInput.placeholder = 'A flexible blog theme designed for Obsidian users.';
-		descInput.setAttribute('value', state.selectedSiteInfo.description);
+		descInput.setAttribute('value', lt(state.selectedSiteInfo.description, state.selectedSiteInfo.defaultLocale ?? state.selectedSiteInfo.language ?? 'en'));
 		
 		const authorGroup = siteInfoForm.createDiv('form-group');
 		const authorLabel = authorGroup.createEl('label', { text: 'Author name' });
@@ -67,7 +68,7 @@ export class WelcomeStep extends BaseWizardStep {
 		langInput.id = 'site-language';
 		// eslint-disable-next-line obsidianmd/ui/sentence-case -- Language code should remain lowercase
 		langInput.placeholder = 'en';
-		langInput.setAttribute('value', state.selectedSiteInfo.language);
+		langInput.setAttribute('value', state.selectedSiteInfo.language ?? state.selectedSiteInfo.defaultLocale ?? 'en');
 
 		// Add change handlers
 		container.querySelector('#run-wizard-startup')?.addEventListener('change', e => {

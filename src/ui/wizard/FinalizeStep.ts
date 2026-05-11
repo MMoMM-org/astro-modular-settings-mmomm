@@ -1,6 +1,6 @@
 import { BaseWizardStep } from './BaseWizardStep';
 import { Notice } from 'obsidian';
-import { TEMPLATE_OPTIONS, THEME_OPTIONS, AstroModularPlugin } from '../../types';
+import { TEMPLATE_OPTIONS, THEME_OPTIONS, AstroModularPlugin, lt } from '../../types';
 
 export class FinalizeStep extends BaseWizardStep {
 	render(container: HTMLElement): void {
@@ -29,7 +29,7 @@ export class FinalizeStep extends BaseWizardStep {
 		createConfigItem('Theme', themeName);
 		createConfigItem('Content Organization', contentOrgName);
 		createConfigItem('Deployment', deploymentName);
-		createConfigItem('Site Title', state.selectedSiteInfo.title);
+		createConfigItem('Site Title', lt(state.selectedSiteInfo.title, state.selectedSiteInfo.defaultLocale ?? state.selectedSiteInfo.language ?? 'en'));
 		createConfigItem('Site URL', state.selectedSiteInfo.site);
 
 		this.setupEventHandlers(container);

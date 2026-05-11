@@ -1,6 +1,6 @@
 import { SettingGroup } from "obsidian";
 import { TabRenderer } from '../common/TabRenderer';
-import { TEMPLATE_OPTIONS, THEME_OPTIONS, AstroModularPlugin, AstroModularSettings } from '../../types';
+import { TEMPLATE_OPTIONS, THEME_OPTIONS, AstroModularPlugin, AstroModularSettings, lt } from '../../types';
 
 
 export class GeneralTab extends TabRenderer {
@@ -59,7 +59,7 @@ export class GeneralTab extends TabRenderer {
 			// Site title
 			const siteTitleItem = configItems.createDiv('config-item');
 			siteTitleItem.createEl('strong', { text: 'Site title: ' });
-			siteTitleItem.createSpan({ text: settings.siteInfo.title });
+			siteTitleItem.createSpan({ text: lt(settings.siteInfo.title, settings.siteInfo.defaultLocale ?? 'en') });
 			
 			// Site URL
 			const siteUrlItem = configItems.createDiv('config-item');

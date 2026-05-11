@@ -1,5 +1,5 @@
 import { Setting, Notice, setIcon , SettingGroup} from 'obsidian';
-import { AstroModularPlugin, NavigationItem } from '../../types';
+import { AstroModularPlugin, NavigationItem, lt } from '../../types';
 import { TabRenderer } from '../common/TabRenderer';
 
 
@@ -615,8 +615,8 @@ export class NavigationTab extends TabRenderer {
 			cls: 'nav-child-title',
 			attr: { placeholder: 'Child title', draggable: 'false' }
 		});
-		titleInput.value = child.title || '';
-		
+		titleInput.value = lt(child.title, this.getSettings().siteInfo?.defaultLocale ?? 'en');
+
 		const urlInput = itemFields.createEl('input', {
 			type: 'text',
 			cls: 'nav-child-url',

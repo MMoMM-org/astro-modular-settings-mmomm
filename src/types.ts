@@ -88,6 +88,24 @@ export type Locale = string;
  */
 export type LocalisedString = Record<Locale, string>;
 
+/**
+ * Resolve a possibly-localised value to a single string for the given locale.
+ * Falls back to the first available value for unknown locales, and to the empty
+ * string for undefined inputs. Used at every UI / template call site where a
+ * `string | LocalisedString` field is consumed as a plain string.
+ */
+export function lt(value: string | LocalisedString | undefined, locale: Locale): string {
+	if (value === undefined || value === null) return '';
+	if (typeof value === 'string') return value;
+	if (typeof value === 'object') {
+		const v = value[locale];
+		if (typeof v === 'string') return v;
+		const fallback = Object.values(value).find((x): x is string => typeof x === 'string');
+		return fallback ?? '';
+	}
+	return '';
+}
+
 export interface SiteInformation {
 	site: string;
 	title: string | LocalisedString;
