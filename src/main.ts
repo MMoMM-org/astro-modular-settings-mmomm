@@ -3,9 +3,10 @@ import { AstroModularSettings, DEFAULT_SETTINGS } from './settings';
 import { registerCommands } from './commands';
 import { AstroModularSettingsTab } from './ui/SettingsTab';
 import { ConfigManager } from './utils/ConfigManager';
+import { ConfigFileManager } from './utils/config/ConfigFileManager';
 import { PluginManager } from './utils/PluginManager';
 import { RibbonIconManager } from './utils/RibbonIconManager';
-import { ObsidianApp } from './types';
+import { ObsidianApp, NavigationItem, LocalisedString } from './types';
 
 export default class AstroModularSettingsPlugin extends Plugin {
 	settings!: AstroModularSettings;
@@ -68,6 +69,72 @@ export default class AstroModularSettingsPlugin extends Plugin {
 	async loadSettings() {
 		const data = await this.loadData() as Partial<AstroModularSettings> | null;
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+
+		// Source-of-truth overlay (ADR-005 Phase 3): config.ts is authoritative
+		// for nav.pages / nav.footer (which may carry i18nKey / urlByLocale /
+		// external / unknown future fields the plugin UI doesn't model), for
+		// locales / defaultLocale, and for LocalisedString site-info / footer
+		// values. data.json caches the rest of the settings.
+		//
+		// Without this overlay, a stale data.json (e.g. synced before the user
+		// added i18nKey/urlByLocale in config.ts) would propagate stripped
+		// nav arrays back to config.ts on the next save — silently nuking the
+		// user-authored fields.
+		try {
+			const fileManager = new ConfigFileManager(this.app);
+			const parsed = fileManager.parseConfigFile();
+			if (parsed) {
+				this.overlayConfigSourceFields(parsed);
+			}
+		} catch (e) {
+			console.error('[astro-modular-settings] config.ts source-of-truth overlay failed:', e);
+		}
+	}
+
+	/**
+	 * Merge config.ts-authoritative fields into `this.settings`. Called after
+	 * data.json is loaded so config.ts values win for round-trip-sensitive
+	 * fields. Quietly skips when config.ts can't be parsed.
+	 */
+	private overlayConfigSourceFields(parsed: Record<string, unknown>): void {
+		const parsedNav = parsed.navigation as Record<string, unknown> | undefined;
+		if (parsedNav) {
+			if (Array.isArray(parsedNav.pages) && parsedNav.pages.length > 0) {
+				this.settings.navigation.pages = parsedNav.pages as NavigationItem[];
+			}
+			if (Array.isArray(parsedNav.footer)) {
+				this.settings.navigation.footer = parsedNav.footer as NavigationItem[];
+			}
+		}
+
+		const parsedSite = parsed.siteInfo as Record<string, unknown> | undefined;
+		if (parsedSite) {
+			// LocalisedString fields: config.ts wins when shape is object (the
+			// shape data.json cannot represent without UI support — which is
+			// exactly the state we want to protect).
+			const localisableFields: Array<'title' | 'description' | 'homepageTitle' | 'defaultOgImageAlt'> =
+				['title', 'description', 'homepageTitle', 'defaultOgImageAlt'];
+			for (const field of localisableFields) {
+				const v = parsedSite[field];
+				if (v && typeof v === 'object' && !Array.isArray(v)) {
+					(this.settings.siteInfo as unknown as Record<string, unknown>)[field] = v as LocalisedString;
+				}
+			}
+			if (Array.isArray(parsedSite.locales)) {
+				this.settings.siteInfo.locales = parsedSite.locales as string[];
+			}
+			if (typeof parsedSite.defaultLocale === 'string') {
+				this.settings.siteInfo.defaultLocale = parsedSite.defaultLocale;
+			}
+		}
+
+		const parsedFooter = parsed.footer as Record<string, unknown> | undefined;
+		if (parsedFooter && 'content' in parsedFooter) {
+			const c = parsedFooter.content;
+			if (c && typeof c === 'object' && !Array.isArray(c)) {
+				this.settings.footer.content = c as LocalisedString;
+			}
+		}
 	}
 
 	async saveSettings() {

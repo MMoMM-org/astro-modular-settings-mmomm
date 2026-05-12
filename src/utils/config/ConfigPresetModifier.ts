@@ -57,6 +57,22 @@ export class ConfigPresetModifier {
 			}
 			const entries = Object.entries(obj).filter(([k]) => !k.startsWith('__spread__'));
 			if (entries.length === 0) return '{}';
+
+			// Inline-small heuristic: when every value is a primitive and the
+			// resulting one-liner is short, emit `{ k: v, ... }` instead of
+			// expanding multi-line. Keeps `urlByLocale: { en: "..." }` compact.
+			const allPrimitive = entries.every(([, v]) =>
+				v === null || v === undefined || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'
+			);
+			if (allPrimitive) {
+				const inlineItems = entries.map(([k, v]) => {
+					const keyStr = /^[A-Za-z_$][\w$]*$/.test(k) ? k : `"${k}"`;
+					return `${keyStr}: ${this.serializeTsValue(v)}`;
+				});
+				const inline = `{ ${inlineItems.join(', ')} }`;
+				if (inline.length <= 100) return inline;
+			}
+
 			const childIndent = indent + '  ';
 			const items = entries.map(([k, v]) => {
 				const keyStr = /^[A-Za-z_$][\w$]*$/.test(k) ? k : `"${k}"`;
@@ -798,29 +814,15 @@ export class ConfigPresetModifier {
 			);
 		}
 		
-		// Object-passthrough nav serializer (ADR-005 Phase 3): unknown fields like
-		// i18nKey, urlByLocale, external survive the round-trip — anything the
-		// parser captured for an item is written back verbatim.
-		modifiedConfig = this.replaceNavigationBlock(
+		// In-place nav serializer (ADR-005 Phase 3): preserves arbitrary unknown
+		// fields on each item AND the surrounding code/comments. Touches only
+		// the array `[...]` body — comments above `pages:`, sibling marker-less
+		// `footer:` blocks, etc. stay intact.
+		modifiedConfig = this.rewriteNavigationArrays(
 			modifiedConfig,
-			'NAVIGATION_PAGES',
-			'pages',
 			settings.navigation.pages as unknown as Record<string, unknown>[],
-			'// [CONFIG:NAVIGATION_FOOTER]',
-			'// [CONFIG:NAVIGATION_SOCIAL]',
+			settings.navigation.footer as unknown as Record<string, unknown>[] | undefined,
 		);
-
-		// Footer nav (parallel to pages). Only writes when settings has a footer
-		// array — otherwise leave the marker block untouched.
-		if (settings.navigation.footer) {
-			modifiedConfig = this.replaceNavigationBlock(
-				modifiedConfig,
-				'NAVIGATION_FOOTER',
-				'footer',
-				settings.navigation.footer as unknown as Record<string, unknown>[],
-				'// [CONFIG:NAVIGATION_SOCIAL]',
-			);
-		}
 
 		// Update navigation social
 		const socialArray = settings.navigation.social.map((social) => {
@@ -835,39 +837,114 @@ export class ConfigPresetModifier {
 	}
 
 	/**
-	 * Replace the body of a `[CONFIG:NAVIGATION_<NAME>]` marker block in config.ts
-	 * with a fresh array, preserving unknown fields on each item. The block is
-	 * bounded by the next listed end-marker (e.g. NAVIGATION_FOOTER, then
-	 * NAVIGATION_SOCIAL) — the first end-marker found in the config wins.
+	 * In-place array replacement: finds the `<fieldName>: [...]` literal anchored
+	 * to a marker (or by structural position) and replaces ONLY the `[...]`
+	 * body, leaving surrounding code/comments untouched. This is the round-trip
+	 * guarantee for nav.pages and nav.footer — comments above the field, and
+	 * sibling blocks like a marker-less footer between PAGES and SOCIAL, are
+	 * preserved.
+	 *
+	 * Returns the config unchanged when the field can't be located (safer than
+	 * an incorrect rewrite).
 	 */
-	private replaceNavigationBlock(
+	private replaceNavArrayInPlace(
 		config: string,
-		markerName: string,
+		anchorIdx: number,
 		fieldName: string,
 		items: Record<string, unknown>[],
-		...endMarkerCandidates: string[]
+		searchLimitIdx: number = config.length,
 	): string {
-		const marker = `// [CONFIG:${markerName}]`;
-		const startIdx = config.indexOf(marker);
-		if (startIdx === -1) return config;
+		if (anchorIdx < 0) return config;
+		const region = config.slice(anchorIdx, searchLimitIdx);
+		const fieldMatch = region.match(new RegExp(`\\b${fieldName}\\s*:\\s*\\[`));
+		if (!fieldMatch || fieldMatch.index === undefined) return config;
 
-		// Find the nearest end marker after the start. If none exist, do nothing
-		// (safer than mis-bounding the replacement).
-		let endIdx = -1;
-		for (const candidate of endMarkerCandidates) {
-			const idx = config.indexOf(candidate, startIdx + marker.length);
-			if (idx !== -1 && (endIdx === -1 || idx < endIdx)) endIdx = idx;
-		}
-		if (endIdx === -1) return config;
+		const bracketStart = anchorIdx + fieldMatch.index + fieldMatch[0].length - 1;
+		const bracketEnd = this.findClosingBracket(config, bracketStart);
+		if (bracketEnd === -1) return config;
 
 		const itemIndent = '      ';
 		const body = items.length === 0
 			? '[]'
 			: `[\n${items.map((p) => this.serializeNavItem(p, itemIndent)).join(',\n')}\n    ]`;
 
-		const before = config.substring(0, startIdx + marker.length);
-		const after = config.substring(endIdx);
-		return `${before}\n    ${fieldName}: ${body},\n    ${after}`;
+		return config.slice(0, bracketStart) + body + config.slice(bracketEnd + 1);
+	}
+
+	/**
+	 * Find the matching `]` for the `[` at openPos. Skips string contents (no
+	 * brackets inside `"..."`/`'...'`/`\`...\`` count). Returns the closing
+	 * bracket position, or -1 if unbalanced.
+	 */
+	private findClosingBracket(content: string, openPos: number): number {
+		if (content[openPos] !== '[') return -1;
+		let depth = 1;
+		let pos = openPos + 1;
+		while (pos < content.length && depth > 0) {
+			const c = content[pos];
+			if (c === '"' || c === "'" || c === '`') {
+				const q = c;
+				pos++;
+				while (pos < content.length && content[pos] !== q) {
+					if (content[pos] === '\\' && pos + 1 < content.length) pos += 2;
+					else pos++;
+				}
+				pos++;
+				continue;
+			}
+			if (c === '[') depth++;
+			else if (c === ']') {
+				depth--;
+				if (depth === 0) return pos;
+			}
+			pos++;
+		}
+		return -1;
+	}
+
+	/**
+	 * Drive the in-place rewrite for nav.pages and (when present) nav.footer.
+	 * Used by both modifyConfigFromPreset and modifyConfigFromFeatures.
+	 */
+	private rewriteNavigationArrays(
+		config: string,
+		pages: Record<string, unknown>[] | undefined,
+		footer: Record<string, unknown>[] | undefined,
+	): string {
+		let out = config;
+		const pagesMarkerIdx = out.indexOf('// [CONFIG:NAVIGATION_PAGES]');
+		const socialMarkerIdx = out.indexOf('// [CONFIG:NAVIGATION_SOCIAL]');
+
+		if (pages && pagesMarkerIdx !== -1) {
+			const searchLimit = socialMarkerIdx !== -1 ? socialMarkerIdx : out.length;
+			out = this.replaceNavArrayInPlace(out, pagesMarkerIdx, 'pages', pages, searchLimit);
+		}
+
+		if (footer && footer.length > 0) {
+			// Prefer explicit FOOTER marker; fall back to structural position
+			// (between pages array end and SOCIAL marker).
+			const footerMarkerIdx = out.indexOf('// [CONFIG:NAVIGATION_FOOTER]');
+			const refreshedSocialIdx = out.indexOf('// [CONFIG:NAVIGATION_SOCIAL]');
+			if (footerMarkerIdx !== -1 && refreshedSocialIdx !== -1 && footerMarkerIdx < refreshedSocialIdx) {
+				out = this.replaceNavArrayInPlace(out, footerMarkerIdx, 'footer', footer, refreshedSocialIdx);
+			} else if (refreshedSocialIdx !== -1) {
+				// Structural: scan between the just-replaced pages array end and SOCIAL.
+				// Re-find pages array end after the in-place rewrite.
+				const refreshedPagesIdx = out.indexOf('// [CONFIG:NAVIGATION_PAGES]');
+				if (refreshedPagesIdx !== -1) {
+					const pagesFieldMatch = out.slice(refreshedPagesIdx, refreshedSocialIdx).match(/\bpages\s*:\s*\[/);
+					if (pagesFieldMatch && pagesFieldMatch.index !== undefined) {
+						const pagesBracketStart = refreshedPagesIdx + pagesFieldMatch.index + pagesFieldMatch[0].length - 1;
+						const pagesBracketEnd = this.findClosingBracket(out, pagesBracketStart);
+						if (pagesBracketEnd !== -1) {
+							out = this.replaceNavArrayInPlace(out, pagesBracketEnd, 'footer', footer, refreshedSocialIdx);
+						}
+					}
+				}
+			}
+		}
+
+		return out;
 	}
 
 	modifyConfigFromFeatures(settings: AstroModularSettings, currentConfig: string): string {
@@ -1066,28 +1143,12 @@ export class ConfigPresetModifier {
 					`// [CONFIG:NAVIGATION_SHOW_MOBILE_MENU]\n    showMobileMenu: ${settings.navigation.showMobileMenu}`
 				);
 			}
-			// Object-passthrough nav.pages serializer (ADR-005 Phase 3).
-			if (settings.navigation.pages) {
-				modifiedConfig = this.replaceNavigationBlock(
-					modifiedConfig,
-					'NAVIGATION_PAGES',
-					'pages',
-					settings.navigation.pages as unknown as Record<string, unknown>[],
-					'// [CONFIG:NAVIGATION_FOOTER]',
-					'// [CONFIG:NAVIGATION_SOCIAL]',
-				);
-			}
-
-			// Object-passthrough nav.footer serializer (ADR-005 Phase 3).
-			if (settings.navigation.footer) {
-				modifiedConfig = this.replaceNavigationBlock(
-					modifiedConfig,
-					'NAVIGATION_FOOTER',
-					'footer',
-					settings.navigation.footer as unknown as Record<string, unknown>[],
-					'// [CONFIG:NAVIGATION_SOCIAL]',
-				);
-			}
+			// In-place nav.pages + nav.footer serializer (ADR-005 Phase 3).
+			modifiedConfig = this.rewriteNavigationArrays(
+				modifiedConfig,
+				settings.navigation.pages as unknown as Record<string, unknown>[] | undefined,
+				settings.navigation.footer as unknown as Record<string, unknown>[] | undefined,
+			);
 			// Update navigation social
 			if (settings.navigation.social) {
 				const socialArray = settings.navigation.social.map(social => 

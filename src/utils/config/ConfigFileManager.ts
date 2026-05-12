@@ -80,9 +80,33 @@ export class ConfigFileManager {
 	 * Returns the parsed JS value and the position immediately after it.
 	 * Whitespace at startPos is consumed.
 	 */
-	private parseTsValue(content: string, startPos: number): { value: unknown; endPos: number } {
+	/**
+	 * Advance past whitespace and TypeScript line/block comments. Used in the
+	 * generic value parsers so embedded comments inside arrays/objects (e.g. a
+	 * documentation block between two array items) are correctly skipped
+	 * rather than being parsed as identifiers.
+	 */
+	private skipWsAndComments(content: string, startPos: number): number {
 		let pos = startPos;
-		while (pos < content.length && /\s/.test(content[pos])) pos++;
+		while (pos < content.length) {
+			if (/\s/.test(content[pos])) { pos++; continue; }
+			if (content[pos] === '/' && content[pos + 1] === '/') {
+				while (pos < content.length && content[pos] !== '\n') pos++;
+				continue;
+			}
+			if (content[pos] === '/' && content[pos + 1] === '*') {
+				pos += 2;
+				while (pos < content.length && !(content[pos] === '*' && content[pos + 1] === '/')) pos++;
+				pos += 2;
+				continue;
+			}
+			break;
+		}
+		return pos;
+	}
+
+	private parseTsValue(content: string, startPos: number): { value: unknown; endPos: number } {
+		let pos = this.skipWsAndComments(content, startPos);
 		const ch = content[pos];
 
 		// String "..."
@@ -148,7 +172,7 @@ export class ConfigFileManager {
 		pos++;
 
 		while (pos < content.length) {
-			while (pos < content.length && /\s/.test(content[pos])) pos++;
+			pos = this.skipWsAndComments(content, pos);
 			if (content[pos] === '}') { pos++; break; }
 
 			// Optional spread `...foo` — passthrough as raw key.
@@ -156,7 +180,7 @@ export class ConfigFileManager {
 			if (spreadMatch) {
 				obj['__spread__' + spreadMatch[0]] = { __raw: spreadMatch[0] };
 				pos += spreadMatch[0].length;
-				while (pos < content.length && /\s/.test(content[pos])) pos++;
+				pos = this.skipWsAndComments(content, pos);
 				if (content[pos] === ',') pos++;
 				continue;
 			}
@@ -171,7 +195,7 @@ export class ConfigFileManager {
 			obj[key] = v.value;
 			pos = v.endPos;
 
-			while (pos < content.length && /\s/.test(content[pos])) pos++;
+			pos = this.skipWsAndComments(content, pos);
 			if (content[pos] === ',') pos++;
 		}
 		return { value: obj, endPos: pos };
@@ -184,14 +208,14 @@ export class ConfigFileManager {
 		pos++;
 
 		while (pos < content.length) {
-			while (pos < content.length && /\s/.test(content[pos])) pos++;
+			pos = this.skipWsAndComments(content, pos);
 			if (content[pos] === ']') { pos++; break; }
 
 			const v = this.parseTsValue(content, pos);
 			arr.push(v.value);
 			pos = v.endPos;
 
-			while (pos < content.length && /\s/.test(content[pos])) pos++;
+			pos = this.skipWsAndComments(content, pos);
 			if (content[pos] === ',') pos++;
 		}
 		return { value: arr, endPos: pos };
@@ -395,27 +419,52 @@ export class ConfigFileManager {
 		// Extract navigation settings
 		const navigation: Record<string, unknown> = { pages: [], social: [] };
 
-		// Navigation pages: the generic parseTsArray preserves arbitrary fields
-		// (i18nKey, urlByLocale, external, etc.) instead of stripping anything that
-		// isn't title/url/children. Wrap the marker-extracted body in brackets so
-		// parseTsArray sees a proper array literal.
-		const pagesMatch = configContent.match(/\/\/ \[CONFIG:NAVIGATION_PAGES\]\s*\n\s*pages:\s*\[([\s\S]*?)\],?\s*(?=\/\/ \[CONFIG:NAVIGATION_(?:FOOTER|SOCIAL)\])/);
-		if (pagesMatch) {
-			const { value } = this.parseTsArray(`[${pagesMatch[1]}]`, 0);
-			navigation.pages = (value as unknown[]).filter(
-				(v): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v)
-			);
+		// Navigation pages: scan forward from the marker for `pages: [` (so the
+		// parser tolerates documentation comments between the marker and the
+		// field — a property the regex-based extractor lacked). Then parseTsArray
+		// preserves arbitrary unknown fields on each item (i18nKey, urlByLocale,
+		// external, future extensions).
+		const pagesMarkerIdx = configContent.indexOf('// [CONFIG:NAVIGATION_PAGES]');
+		const socialMarkerIdx = configContent.indexOf('// [CONFIG:NAVIGATION_SOCIAL]');
+		let pagesArrayEnd = -1;
+		if (pagesMarkerIdx !== -1) {
+			const searchEnd = socialMarkerIdx !== -1 ? socialMarkerIdx : configContent.length;
+			const pagesFieldMatch = configContent.slice(pagesMarkerIdx, searchEnd).match(/\bpages\s*:\s*\[/);
+			if (pagesFieldMatch && pagesFieldMatch.index !== undefined) {
+				const bracketIdx = pagesMarkerIdx + pagesFieldMatch.index + pagesFieldMatch[0].length - 1;
+				const { value, endPos } = this.parseTsArray(configContent, bracketIdx);
+				navigation.pages = (value as unknown[]).filter(
+					(v): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v)
+				);
+				pagesArrayEnd = endPos;
+			}
 		}
 
-		// Navigation footer: optional, parallel shape to NAVIGATION_PAGES. Bounded
-		// either by NAVIGATION_SOCIAL (when footer comes before social) or by the
-		// closing bracket of the navigation object.
-		const footerMatch = configContent.match(/\/\/ \[CONFIG:NAVIGATION_FOOTER\]\s*\n\s*footer:\s*\[([\s\S]*?)\],?\s*(?=\/\/ \[CONFIG:NAVIGATION_SOCIAL\]|\}\s*,|\}\s*\))/);
-		if (footerMatch) {
-			const { value } = this.parseTsArray(`[${footerMatch[1]}]`, 0);
-			navigation.footer = (value as unknown[]).filter(
-				(v): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v)
-			);
+		// Navigation footer: either anchored to its own [CONFIG:NAVIGATION_FOOTER]
+		// marker (preferred), or detected structurally as a `footer: [...]` block
+		// between the pages array end and the SOCIAL marker. Same passthrough
+		// semantics as nav.pages.
+		const footerMarkerIdx = configContent.indexOf('// [CONFIG:NAVIGATION_FOOTER]');
+		if (footerMarkerIdx !== -1 && socialMarkerIdx !== -1 && footerMarkerIdx < socialMarkerIdx) {
+			const footerFieldMatch = configContent.slice(footerMarkerIdx, socialMarkerIdx).match(/\bfooter\s*:\s*\[/);
+			if (footerFieldMatch && footerFieldMatch.index !== undefined) {
+				const bracketIdx = footerMarkerIdx + footerFieldMatch.index + footerFieldMatch[0].length - 1;
+				const { value } = this.parseTsArray(configContent, bracketIdx);
+				navigation.footer = (value as unknown[]).filter(
+					(v): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v)
+				);
+			}
+		} else if (pagesArrayEnd !== -1 && socialMarkerIdx !== -1) {
+			// No marker — try structural detection between pages end and SOCIAL marker.
+			const between = configContent.slice(pagesArrayEnd, socialMarkerIdx);
+			const footerFieldMatch = between.match(/\bfooter\s*:\s*\[/);
+			if (footerFieldMatch && footerFieldMatch.index !== undefined) {
+				const bracketIdx = pagesArrayEnd + footerFieldMatch.index + footerFieldMatch[0].length - 1;
+				const { value } = this.parseTsArray(configContent, bracketIdx);
+				navigation.footer = (value as unknown[]).filter(
+					(v): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v)
+				);
+			}
 		}
 		
 		// Extract navigation social
